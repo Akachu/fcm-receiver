@@ -1,17 +1,21 @@
 import 'dart:convert';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:f_logs/f_logs.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'package:package_info/package_info.dart';
 
 Future<void> messageHandler(Map<String, dynamic> message) async {
+  JsonEncoder encoder = new JsonEncoder.withIndent('  ');
+
   FLog.info(
-    className: "logs",
+    className: "FCM",
     methodName: "message inbound",
-    text: jsonEncode(message),
+    text: encoder.convert(message),
   );
 }
 
@@ -22,16 +26,32 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'fcm-receiver',
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: MyHomePage(
-        title: "Fcm receiver",
+      theme: ThemeData(
+        brightness: Brightness.light,
+        primaryColor: CupertinoColors.systemBlue,
+        scaffoldBackgroundColor: CupertinoColors.systemBackground,
+        buttonBarTheme: ButtonBarThemeData(
+          buttonPadding: EdgeInsets.symmetric(vertical: 4),
+        ),
       ),
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        primaryColor: CupertinoColors.systemBlue,
+        scaffoldBackgroundColor: CupertinoColors.darkBackgroundGray,
+        buttonBarTheme: ButtonBarThemeData(
+          buttonPadding: EdgeInsets.symmetric(vertical: 4),
+        ),
+      ),
+      home: MyHomePage(title: "FCM Receiver"),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, @required this.title}) : super(key: key);
+  MyHomePage({
+    Key key,
+    @required this.title,
+  }) : super(key: key);
 
   final String title;
 
@@ -40,14 +60,24 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  final FirebaseMessaging _firebaseMessaging = FirebaseMessaging();
+  final FirebaseMessaging fcm = FirebaseMessaging();
   final TextEditingController _tokenTextController = TextEditingController();
   final TextEditingController _topicTextController = TextEditingController();
-  List<String> logList = [];
+
+  List<Log> _logs = [];
+
+  String appInfoString = '';
 
   @override
   void initState() {
-    _firebaseMessaging.configure(
+    PackageInfo.fromPlatform().then((PackageInfo packageInfo) {
+      setState(() {
+        appInfoString = "v${packageInfo.version}+${packageInfo.buildNumber}";
+      });
+    });
+
+    fcm.requestNotificationPermissions();
+    fcm.configure(
       onBackgroundMessage: messageHandler,
       onMessage: messageHandler,
       onLaunch: messageHandler,
@@ -61,41 +91,54 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void getToken() async {
-    String token = await _firebaseMessaging.getToken();
+    String token = await fcm.getToken();
     _tokenTextController.text = token;
   }
 
-  void refreshLogs() async {
+  Future refreshLogs() async {
     List<Log> logs = await FLog.getAllLogs();
 
     setState(() {
-      logList = logs
-          .map((log) =>
-              "[${log.methodName}] ${DateTime.fromMillisecondsSinceEpoch(log.timeInMillis).toString()}: ${log.text}")
-          .toList();
+      _logs = logs;
     });
-    showToast("logs refreshed");
+  }
+
+  void clearLogs() async {
+    await FLog.clearLogs();
+    showToast('logs cleared');
+    refreshLogs();
   }
 
   void subscribe() async {
     String topic = _topicTextController.text;
-    await _firebaseMessaging.subscribeToTopic(topic);
-    FLog.info(
-      className: "logs",
+    if (topic == "") return;
+    _topicTextController.text = "";
+
+    clearFocus();
+    await fcm.subscribeToTopic(topic);
+    await FLog.info(
+      className: "APP",
       methodName: "subscribe",
-      text: "subscribe to topic: $topic",
+      text: "topic: $topic",
     );
+
+    await refreshLogs();
     showToast("subscribed");
   }
 
-  void unSubscribe() async {
+  void unsubscribe() async {
     String topic = _topicTextController.text;
-    await _firebaseMessaging.unsubscribeFromTopic(topic);
-    FLog.info(
-      className: "logs",
+    if (topic == "") return;
+    _topicTextController.text = "";
+
+    clearFocus();
+    await fcm.unsubscribeFromTopic(topic);
+    await FLog.info(
+      className: "APP",
       methodName: "unsubscribe",
-      text: "un-subscribe to topic: $topic",
+      text: "topic: $topic",
     );
+    await refreshLogs();
     showToast("unsubscribed");
   }
 
@@ -107,6 +150,54 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  void clearFocus() {
+    FocusScopeNode currentFocus = FocusScope.of(context);
+    if (!currentFocus.hasPrimaryFocus) {
+      currentFocus.unfocus();
+      if (currentFocus.focusedChild != null) {
+        currentFocus.focusedChild.unfocus();
+      }
+    }
+  }
+
+  Widget logItemBuilder(Log log) {
+    String time =
+        DateTime.fromMillisecondsSinceEpoch(log.timeInMillis).toString();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Text(
+              log.className,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(width: 4),
+            Text(
+              log.methodName,
+              style: TextStyle(
+                fontSize: 14,
+                color: Theme.of(context).primaryColor,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
+        SizedBox(height: 2),
+        SelectableText(log.text),
+        SizedBox(height: 4),
+        Text(
+          time,
+          style: Theme.of(context).textTheme.caption,
+        )
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     Widget body = Column(
@@ -115,17 +206,16 @@ class _MyHomePageState extends State<MyHomePage> {
         TextField(
           decoration: InputDecoration(
             isDense: true,
-            hintText: "Token",
+            labelText: "Token",
             border: OutlineInputBorder(),
           ),
           readOnly: true,
           controller: _tokenTextController,
         ),
-        SizedBox(height: 4),
         ButtonBar(
           children: <Widget>[
-            FlatButton(
-              child: Text('copy token'),
+            CupertinoButton(
+              child: Text('Copy token'),
               onPressed: () {
                 Clipboard.setData(
                   ClipboardData(text: _tokenTextController.text),
@@ -139,73 +229,78 @@ class _MyHomePageState extends State<MyHomePage> {
         TextField(
           decoration: InputDecoration(
             isDense: true,
-            hintText: "Topic",
+            labelText: "Topic",
             border: OutlineInputBorder(),
           ),
           controller: _topicTextController,
         ),
-        SizedBox(height: 4),
         ButtonBar(
-          alignment: MainAxisAlignment.spaceBetween,
           children: <Widget>[
-            FlatButton(
+            CupertinoButton(
               child: Text("Subscribe"),
               onPressed: subscribe,
             ),
-            FlatButton(
-              child: Text("Un-subscribe"),
-              onPressed: unSubscribe,
-            ),
-            FlatButton(
-              child: Text("Reset"),
-              onPressed: () {
-                _topicTextController.text = "";
-              },
+            CupertinoButton(
+              child: Text("Unsubscribe"),
+              onPressed: unsubscribe,
             ),
           ],
         ),
         SizedBox(height: 4),
         Expanded(
-          child: ListView(
-            physics: BouncingScrollPhysics(),
-            children: logList.map((log) => SelectableText(log)).toList(),
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: Theme.of(context).disabledColor),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            padding: EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+            child: ListView.separated(
+              separatorBuilder: (context, index) => Divider(),
+              itemCount: _logs.length,
+              itemBuilder: (context, index) => logItemBuilder(_logs[index]),
+              physics: BouncingScrollPhysics(),
+            ),
           ),
         ),
-        SizedBox(height: 4),
         ButtonBar(
           children: <Widget>[
-            FlatButton(
-              child: Text('refresh logs'),
-              onPressed: refreshLogs,
-            )
+            CupertinoButton(
+              child: Text('Refresh'),
+              onPressed: () async {
+                await refreshLogs();
+                showToast("logs refreshed");
+              },
+            ),
+            CupertinoButton(
+              child: Text('Clear'),
+              onPressed: clearLogs,
+            ),
           ],
         ),
+        Text(appInfoString, style: Theme.of(context).textTheme.caption),
+        SizedBox(height: 16),
       ],
     );
 
-    body = Padding(padding: EdgeInsets.only(left: 16, right: 16), child: body);
+    body = Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: body);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          widget.title,
-          style: TextStyle(color: Theme.of(context).textTheme.bodyText1.color),
+    Color backgroundColor = Theme.of(context).scaffoldBackgroundColor;
+
+    return GestureDetector(
+      onTap: clearFocus,
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        appBar: AppBar(
+          title: Text(
+            widget.title,
+            style:
+                TextStyle(color: Theme.of(context).textTheme.bodyText1.color),
+          ),
+          backgroundColor: backgroundColor,
+          elevation: 0,
         ),
-        backgroundColor: Theme.of(context).dialogBackgroundColor,
-        elevation: 0,
-      ),
-      backgroundColor: Theme.of(context).dialogBackgroundColor,
-      body: GestureDetector(
-        onTap: () {
-          FocusScopeNode currentFocus = FocusScope.of(context);
-          if (!currentFocus.hasPrimaryFocus) {
-            currentFocus.unfocus();
-            if (currentFocus.focusedChild != null) {
-              currentFocus.focusedChild.unfocus();
-            }
-          }
-        },
-        child: body,
+        backgroundColor: backgroundColor,
+        body: body,
       ),
     );
   }
